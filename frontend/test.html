@@ -1,0 +1,106 @@
+<!DOCTYPE html>
+<html>
+<head><title>Audio Test</title></head>
+<body style="background:#111;color:#fff;font-family:sans-serif;padding:20px;">
+<h2>Gemini Audio Test</h2>
+<button id="start" style="padding:20px 40px;font-size:18px;">Start Test</button>
+<div id="vol" style="margin-top:10px;font-size:16px;color:#4ade80;"></div>
+<pre id="log" style="margin-top:10px;font-size:13px;max-height:70vh;overflow:auto;"></pre>
+<script>
+const logEl = document.getElementById('log');
+const volEl = document.getElementById('vol');
+function addLog(msg) { logEl.textContent += msg + '\n'; logEl.scrollTop = logEl.scrollHeight; }
+
+// URL-safe base64 to standard base64
+function b64UrlSafeToStandard(b64) {
+    let s = b64.replace(/-/g, '+').replace(/_/g, '/');
+    while (s.length % 4) s += '=';
+    return s;
+}
+
+function b64ToArrayBuffer(b64) {
+    const std = b64UrlSafeToStandard(b64);
+    const binary = atob(std);
+    const bytes = new Uint8Array(binary.length);
+    for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
+    return bytes.buffer;
+}
+
+document.getElementById('start').onclick = async () => {
+    addLog('Creating AudioContext (24kHz)...');
+    const playCtx = new AudioContext({ sampleRate: 24000 });
+    addLog('AudioContext state: ' + playCtx.state + ', sampleRate: ' + playCtx.sampleRate);
+    if (playCtx.state === 'suspended') await playCtx.resume();
+
+    addLog('Playing test beep...');
+    const osc = playCtx.createOscillator();
+    const gain = playCtx.createGain();
+    osc.frequency.value = 440; gain.gain.value = 0.3;
+    osc.connect(gain); gain.connect(playCtx.destination);
+    osc.start(); osc.stop(playCtx.currentTime + 0.3);
+    await new Promise(r => setTimeout(r, 500));
+    addLog('Beep done.');
+
+    const userId = 'test_' + Date.now();
+    const sessionId = 'sess_' + Date.now();
+    const protocol = location.protocol === 'https:' ? 'wss:' : 'ws:';
+    const ws = new WebSocket(protocol + '//' + location.host + '/ws/' + userId + '/' + sessionId);
+    ws.binaryType = 'arraybuffer';
+
+    let audioChunks = [];
+    let isPlaying = false;
+    let totalSamples = 0;
+
+    async function playNext() {
+        if (audioChunks.length === 0) { isPlaying = false; return; }
+        isPlaying = true;
+        const f32 = audioChunks.shift();
+        const buf = playCtx.createBuffer(1, f32.length, 24000);
+        buf.getChannelData(0).set(f32);
+        const src = playCtx.createBufferSource();
+        src.buffer = buf;
+        src.connect(playCtx.destination);
+        src.onended = () => playNext();
+        src.start();
+    }
+
+    ws.onopen = () => {
+        addLog('Connected! Sending prompt...');
+        ws.send(JSON.stringify({ type: 'text', data: 'Count from 1 to 5 loudly.' }));
+    };
+
+    ws.onmessage = (event) => {
+        try {
+            const data = JSON.parse(event.data);
+            if (data.content && data.content.parts) {
+                for (const part of data.content.parts) {
+                    if (part.thought) continue;
+                    if (part.inlineData && part.inlineData.data) {
+                        const raw = b64ToArrayBuffer(part.inlineData.data);
+                        const int16 = new Int16Array(raw);
+                        const float32 = new Float32Array(int16.length);
+                        let peak = 0;
+                        for (let i = 0; i < int16.length; i++) {
+                            float32[i] = int16[i] / 32768;
+                            peak = Math.max(peak, Math.abs(float32[i]));
+                        }
+                        totalSamples += int16.length;
+                        volEl.textContent = 'Peak: ' + peak.toFixed(3) + ' | Samples: ' + totalSamples + ' | Queue: ' + audioChunks.length;
+                        audioChunks.push(float32);
+                        if (!isPlaying) playNext();
+                    }
+                    if (part.text && !part.thought) addLog('[text] ' + part.text.slice(0, 100));
+                }
+            }
+            if (data.outputTranscription && data.outputTranscription.text)
+                addLog('[transcript] ' + data.outputTranscription.text);
+            if (data.turnComplete) addLog('[done] Total samples: ' + totalSamples);
+        } catch(e) { addLog('Error: ' + e.message); }
+    };
+
+    ws.onerror = () => addLog('WebSocket error');
+    ws.onclose = (e) => addLog('Closed: ' + e.code);
+};
+</script>
+</body>
+</html>

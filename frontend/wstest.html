@@ -1,0 +1,91 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>WS Debug</title>
+    <style>body{background:#111;color:#fff;font-family:sans-serif;padding:16px}button{padding:16px 32px;font-size:18px;margin:8px}pre{font-size:13px;max-height:70vh;overflow:auto;margin-top:12px;}</style>
+</head>
+<body>
+<h3>WebSocket Debug</h3>
+<button id="b1">Test 1: Plain WS</button>
+<button id="b2">Test 2: WS + Camera</button>
+<button id="b3">Test 3: WS + Camera + MediaPipe import</button>
+<pre id="log"></pre>
+<script>
+const L = document.getElementById('log');
+function log(m) { L.textContent += m + '\n'; L.scrollTop=L.scrollHeight; }
+
+function testWS(label) {
+    const uid = 'dbg_' + Date.now();
+    const sid = 'ds_' + Date.now();
+    const p = location.protocol === 'https:' ? 'wss:' : 'ws:';
+    const url = p + '//' + location.host + '/ws/' + uid + '/' + sid;
+    log(label + ': connecting ' + sid);
+    const ws = new WebSocket(url);
+    ws.binaryType = 'arraybuffer';
+    ws.onopen = function() {
+        log(label + ': OPEN');
+        ws.send(JSON.stringify({type:'text',data:'Say hello briefly'}));
+    };
+    ws.onmessage = function(e) {
+        try {
+            const d = JSON.parse(e.data);
+            if (d.content && d.content.parts) {
+                for (const p of d.content.parts) {
+                    if (p.inlineData) log(label + ': AUDIO chunk ' + p.inlineData.data.length);
+                    if (p.text && !p.thought) log(label + ': TEXT ' + p.text.slice(0,60));
+                }
+            }
+            if (d.outputTranscription && d.outputTranscription.text)
+                log(label + ': TRANSCRIPT ' + d.outputTranscription.text);
+        } catch(err) { log(label + ': parse err'); }
+    };
+    ws.onclose = function(e) { log(label + ': CLOSE code=' + e.code + ' reason=' + e.reason); };
+    ws.onerror = function() { log(label + ': ERROR'); };
+    return ws;
+}
+
+// Test 1: Plain WebSocket, nothing else
+document.getElementById('b1').onclick = function() {
+    log('--- TEST 1: Plain WS ---');
+    testWS('T1');
+};
+
+// Test 2: getUserMedia THEN WebSocket
+document.getElementById('b2').onclick = async function() {
+    log('--- TEST 2: Camera + WS ---');
+    try {
+        log('T2: requesting camera+mic...');
+        const stream = await navigator.mediaDevices.getUserMedia({video:true, audio:true});
+        log('T2: camera OK, tracks=' + stream.getTracks().length);
+        testWS('T2');
+    } catch(e) {
+        log('T2: camera FAILED: ' + e.message);
+        testWS('T2-nocam');
+    }
+};
+
+// Test 3: Import MediaPipe module THEN camera THEN WebSocket
+document.getElementById('b3').onclick = async function() {
+    log('--- TEST 3: MediaPipe + Camera + WS ---');
+    try {
+        log('T3: importing mediapipe...');
+        await import('https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.18/vision_bundle.mjs');
+        log('T3: mediapipe loaded');
+    } catch(e) {
+        log('T3: mediapipe FAILED: ' + e.message);
+    }
+    try {
+        log('T3: requesting camera+mic...');
+        const stream = await navigator.mediaDevices.getUserMedia({video:true, audio:true});
+        log('T3: camera OK');
+        testWS('T3');
+    } catch(e) {
+        log('T3: camera FAILED: ' + e.message);
+        testWS('T3-nocam');
+    }
+};
+</script>
+</body>
+</html>
